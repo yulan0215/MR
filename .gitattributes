@@ -7,3 +7,5 @@
 *.svg text eol=lf
 *.png binary
 *.docx binary
+# Original source files: SHA-256 in SOURCE_MANIFEST.json covers the exact bytes
+preparation/** -text

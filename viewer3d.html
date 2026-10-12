@@ -1,0 +1,433 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>3D view</title>
+<style>
+  :root { --bg: #0f1722; --bar: #142030; --line: #24344a; --text: #e6edf5; --muted: #8fa3b8; --accent: #5eead4; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: var(--bg); color: var(--text);
+               font: 12px -apple-system, "Segoe UI", "PingFang SC", Arial, sans-serif; }
+  body { display: flex; flex-direction: column; }
+  header, footer { display: flex; align-items: center; gap: 10px; padding: 6px 10px; background: var(--bar);
+                   border-bottom: 1px solid var(--line); white-space: nowrap; }
+  footer { border-top: 1px solid var(--line); border-bottom: 0; color: var(--muted); min-height: 28px; }
+  header .name { font-weight: 600; min-width: 0; flex: 0 1 30ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .muted { color: var(--muted); }
+  .spacer { flex: 1; }
+  label { display: inline-flex; align-items: center; gap: 5px; color: var(--muted); }
+  select, input, button { font: inherit; color: var(--text); background: #1b2a3d; border: 1px solid var(--line);
+                          border-radius: 5px; padding: 3px 7px; }
+  button { cursor: pointer; }
+  button:hover, select:hover { border-color: #3b5573; }
+  input[type=range] { padding: 0; width: 80px; accent-color: var(--accent); }
+  input[type=checkbox] { accent-color: var(--accent); }
+  #find { width: 120px; }
+  main { position: relative; flex: 1; min-height: 0; }
+  canvas { display: block; width: 100%; height: 100%; cursor: grab; }
+  canvas:active { cursor: grabbing; }
+  #legend { position: absolute; left: 10px; bottom: 10px; background: rgba(20, 32, 48, .88); border: 1px solid var(--line);
+            border-radius: 6px; padding: 8px 10px; min-width: 170px; max-height: 45%; overflow: auto; }
+  #legend .title { color: var(--muted); margin-bottom: 5px; }
+  #legend .row { display: flex; align-items: center; gap: 7px; margin: 3px 0; }
+  #legend .row .count { margin-left: auto; color: var(--muted); padding-left: 12px; }
+  .swatch { width: 10px; height: 10px; border-radius: 50%; display: inline-block; flex: none; }
+  .ramp { height: 8px; border-radius: 4px; margin: 4px 0 2px; width: 160px; }
+  .ramp-labels { display: flex; justify-content: space-between; color: var(--muted); }
+  #scale { position: absolute; right: 12px; bottom: 10px; color: var(--muted); text-align: right; }
+  #pick { color: var(--text); }
+</style>
+</head>
+<body>
+<header>
+  <span class="name" id="title"></span>
+  <span class="spacer"></span>
+  <label title="How points are coloured: by detected class, by object (one colour each), by the class stored in the input file (LAS class), by comparison with known targets (Truth), by height or by intensity.">Colour <select id="colour">
+    <option value="class">Class</option><option value="objects">Objects</option>
+    <option value="las">LAS class</option><option value="truth">Truth</option>
+    <option value="height">Height</option><option value="intensity">Intensity</option>
+  </select></label>
+  <label title="Point size. Drag right for bigger, easier-to-see points; left for smaller points and finer detail.">Size <input id="size" type="range" min="1" max="6" step="0.5" value="2"></label>
+  <label title="Adds shading so 3D shapes are easier to see; untick for flat colours."><input id="edl" type="checkbox" checked> Shading</label>
+  <input id="find" type="text" placeholder="Find object ID ↵" title="Type an object ID, or a known target ID such as T004, and press Enter to jump to it.">
+  <button id="top" title="Look straight down from above.">Top</button>
+  <button id="reset" title="Return to the default view showing the whole point cloud.">Reset view</button>
+</header>
+<main>
+  <canvas id="gl" title="Drag: rotate · Right-drag or Shift-drag: pan · Wheel: zoom · Double-click: reset"></canvas>
+  <div id="legend"></div>
+  <div id="scale"></div>
+</main>
+<footer><span id="pick">Click a point to identify it.</span><span class="spacer"></span><span id="summary"></span></footer>
+<script id="data" type="application/json">/*DATA*/</script>
+<script>
+"use strict";
+const D = JSON.parse(document.getElementById("data").textContent);
+const decode = s => { const b = atob(s), u = new Uint8Array(b.length); for (let i = 0; i < b.length; i++) u[i] = b.charCodeAt(i); return u.buffer; };
+const P = new Float32Array(decode(D.xyz)), I = new Int32Array(decode(D.instance)), N = I.length;
+const K = D.cls ? new Uint8Array(decode(D.cls)) : Uint8Array.from(I, v => v > 0 ? 1 : 0);
+const V = D.intensity ? new Uint8Array(decode(D.intensity)) : null;
+const classNames = D.classes || [[0, "background"], [1, "object"]];  // [class id, name]; K holds the list position.
+const originZ = D.origin_z || 0;
+const objects = new Map(D.objects.map(o => [o[0], o]));  // instance -> [instance, id, class, points, confidence, x, y, z]
+const $ = id => document.getElementById(id);
+$("title").textContent = D.name;
+$("title").title = D.name;
+$("summary").textContent = `${N.toLocaleString("en")} of ${D.total.toLocaleString("en")} points · ${D.objects.length.toLocaleString("en")} objects`;
+const L = D.las ? new Uint8Array(decode(D.las)) : null;  // Input LAS classification code per point.
+const T = D.truth ? new Uint8Array(decode(D.truth)) : null;  // 0 none, 1 detected target, 2 false alarm, 3 missed.
+const truthObjects = D.truth_objects || [];  // [id, class, status, x, y, z]
+if (!V) $("colour").querySelector("[value=intensity]").disabled = true;
+if (!L) $("colour").querySelector("[value=las]").disabled = true;
+if (!T) $("colour").querySelector("[value=truth]").disabled = true;
+
+// ---- WebGL2: points into an offscreen buffer, then eye-dome lighting (EDL) onto the screen.
+const canvas = $("gl");
+const gl = canvas.getContext("webgl2", { antialias: false });
+if (!gl) $("pick").textContent = "WebGL 2 is unavailable on this computer.";
+function program(vs, fs) {
+  const p = gl.createProgram();
+  for (const [type, src] of [[gl.VERTEX_SHADER, vs], [gl.FRAGMENT_SHADER, fs]]) {
+    const s = gl.createShader(type);
+    gl.shaderSource(s, "#version 300 es\nprecision highp float;\nprecision highp int;\n" + src);
+    gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+    gl.attachShader(p, s);
+  }
+  gl.linkProgram(p);
+  return p;
+}
+const pointProg = program(
+  `in vec3 p; in vec3 c; in float k; uniform mat4 m; uniform float s; uniform uint hidden; out vec3 v;
+   void main() { gl_Position = m * vec4(p, 1.0); gl_PointSize = s; v = c;
+     if (((hidden >> uint(k)) & 1u) == 1u) gl_Position = vec4(2.0, 2.0, 2.0, 1.0); }`,
+  `in vec3 v; out vec4 o; void main() { vec2 d = gl_PointCoord - 0.5; if (dot(d, d) > 0.25) discard; o = vec4(v, 1.0); }`);
+const lineProg = program(
+  `in vec3 p; uniform mat4 m; void main() { gl_Position = m * vec4(p, 1.0); }`,
+  `uniform vec4 col; out vec4 o; void main() { o = col; }`);
+const edlProg = program(
+  `out vec2 uv; void main() { vec2 q = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2)); uv = q; gl_Position = vec4(q * 2.0 - 1.0, 0.0, 1.0); }`,
+  `in vec2 uv; uniform sampler2D colour; uniform sampler2D depth; uniform vec2 px; uniform float near; uniform float far;
+   uniform float strength; uniform vec3 bg; out vec4 o;
+   float lin(vec2 t) { float z = texture(depth, t).r * 2.0 - 1.0; return 2.0 * near * far / (far + near - z * (far - near)); }
+   void main() {
+     float d = texture(depth, uv).r;
+     if (d >= 1.0) { o = vec4(bg, 1.0); return; }
+     float c = log2(lin(uv)), r = 0.0;
+     vec2 dirs[8] = vec2[](vec2(1,0), vec2(-1,0), vec2(0,1), vec2(0,-1), vec2(.7,.7), vec2(-.7,.7), vec2(.7,-.7), vec2(-.7,-.7));
+     for (int i = 0; i < 8; i++) {
+       vec2 t = uv + dirs[i] * px * 1.5;
+       float n = texture(depth, t).r >= 1.0 ? c - 0.3 : log2(lin(t));  // Empty neighbours outline the silhouette.
+       r += max(0.0, c - n);
+     }
+     o = vec4(texture(colour, uv).rgb * exp(-r * strength), 1.0);
+   }`);
+const loc = (p, n) => gl.getUniformLocation(p, n);
+const vao = gl.createVertexArray();
+gl.bindVertexArray(vao);
+const buffer = (data, attr, size, type, normalised) => {
+  const b = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, b); gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW);
+  const a = gl.getAttribLocation(pointProg, attr); gl.enableVertexAttribArray(a); gl.vertexAttribPointer(a, size, type, normalised, 0, 0);
+  return b;
+};
+buffer(P, "p", 3, gl.FLOAT, false);
+const colBuf = buffer(new Uint8Array(3 * N), "c", 3, gl.UNSIGNED_BYTE, true);
+buffer(K, "k", 1, gl.UNSIGNED_BYTE, false);
+let fbo = null, colourTex, depthTex, fboSize = [0, 0];
+function targets(w, h) {
+  if (fbo && fboSize[0] === w && fboSize[1] === h) return;
+  if (fbo) { gl.deleteFramebuffer(fbo); gl.deleteTexture(colourTex); gl.deleteTexture(depthTex); }
+  const tex = (internal, format, type) => {
+    const t = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, t);
+    gl.texImage2D(gl.TEXTURE_2D, 0, internal, w, h, 0, format, type, null);
+    for (const k of [gl.TEXTURE_MIN_FILTER, gl.TEXTURE_MAG_FILTER]) gl.texParameteri(gl.TEXTURE_2D, k, gl.NEAREST);
+    for (const k of [gl.TEXTURE_WRAP_S, gl.TEXTURE_WRAP_T]) gl.texParameteri(gl.TEXTURE_2D, k, gl.CLAMP_TO_EDGE);
+    return t;
+  };
+  colourTex = tex(gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE);
+  depthTex = tex(gl.DEPTH_COMPONENT24, gl.DEPTH_COMPONENT, gl.UNSIGNED_INT);
+  fbo = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, colourTex, 0);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.TEXTURE_2D, depthTex, 0);
+  fboSize = [w, h];
+}
+
+// ---- Scene extent, principal direction and ground grid.
+const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+for (let i = 0; i < N; i++) for (let k = 0; k < 3; k++) { const v = P[3 * i + k]; if (v < lo[k]) lo[k] = v; if (v > hi[k]) hi[k] = v; }
+const centre = lo.map((v, k) => (v + hi[k]) / 2);
+const radius = Math.max(1, Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]) / 2);
+// Robust height range (2nd–98th percentile of a sample) so outliers do not flatten the colours.
+const zs = []; for (let i = 0; i < N; i += Math.max(1, Math.floor(N / 20000))) zs.push(P[3 * i + 2]);
+zs.sort((a, b) => a - b);
+const zLo = zs[Math.floor(zs.length * 0.02)], zHi = Math.max(zs[Math.floor(zs.length * 0.98)], zLo + 1e-3);
+let sxx = 0, syy = 0, sxy = 0;
+for (let i = 0; i < N; i += Math.max(1, Math.floor(N / 50000))) {
+  const x = P[3 * i] - centre[0], y = P[3 * i + 1] - centre[1]; sxx += x * x; syy += y * y; sxy += x * y;
+}
+const mainAxis = 0.5 * Math.atan2(2 * sxy, sxx - syy);  // Long direction of the survey strip.
+const niceStep = span => { const r = Math.pow(10, Math.floor(Math.log10(span / 8))); return [1, 2, 5, 10].map(f => f * r).find(s => span / s <= 12); };
+const step = niceStep(Math.max(hi[0] - lo[0], hi[1] - lo[1], 1));
+const gx0 = Math.floor(lo[0] / step) * step, gx1 = Math.ceil(hi[0] / step) * step;
+const gy0 = Math.floor(lo[1] / step) * step, gy1 = Math.ceil(hi[1] / step) * step, gz = lo[2];
+const grid = [];
+for (let x = gx0; x <= gx1 + 1e-6; x += step) grid.push(x, gy0, gz, x, gy1, gz);
+for (let y = gy0; y <= gy1 + 1e-6; y += step) grid.push(gx0, y, gz, gx1, y, gz);
+const gridVao = gl.createVertexArray(); gl.bindVertexArray(gridVao);
+gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer()); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(grid), gl.STATIC_DRAW);
+const gp = gl.getAttribLocation(lineProg, "p"); gl.enableVertexAttribArray(gp); gl.vertexAttribPointer(gp, 3, gl.FLOAT, false, 0, 0);
+gl.bindVertexArray(vao);
+$("scale").textContent = `Grid ${step >= 1 ? step : step.toFixed(2)} m`;
+
+// ---- Colours.
+const ramp = (stops, t) => { t = Math.min(1, Math.max(0, t)) * (stops.length - 1); const a = Math.min(stops.length - 2, Math.floor(t)), f = t - a;
+  return stops[a].map((v, k) => v + (stops[a + 1][k] - v) * f); };
+const VIRIDIS = [[68, 1, 84], [65, 68, 135], [42, 120, 142], [34, 168, 132], [122, 209, 81], [253, 231, 37]];
+const TERRAIN = [[46, 62, 86], [70, 96, 120], [110, 132, 140], [160, 166, 150], [205, 200, 180]];  // Muted, for background.
+const GREY = [[40, 40, 40], [250, 250, 250]];
+const CLASS = [[52, 211, 153], [250, 204, 21], [244, 114, 182], [96, 165, 250], [251, 146, 60], [167, 139, 250], [74, 222, 128], [248, 113, 113]];
+// ASPRS-style colours for the input file's LAS classes; codes not listed get a grey.
+const LAS_COLOUR = {0: [150, 150, 150], 1: [170, 170, 170], 2: [166, 120, 70], 3: [120, 200, 90], 4: [70, 170, 60],
+  5: [30, 120, 40], 6: [230, 90, 70], 7: [255, 0, 255], 9: [60, 120, 230], 17: [240, 200, 80], 18: [255, 0, 255],
+  40: [230, 190, 110], 41: [70, 160, 255], 42: [120, 200, 255], 43: [255, 120, 40], 44: [255, 160, 90], 45: [40, 90, 200],
+  64: [255, 230, 0], 65: [255, 60, 60]};
+const TRUTH = [null, [46, 204, 113], [231, 76, 60], [255, 0, 255]];
+const TRUTH_NAMES = ["", "Detected target", "False alarm", "Missed target"];
+const OBJECT = [[78, 121, 167], [242, 142, 43], [225, 87, 89], [118, 183, 178], [89, 161, 79], [237, 201, 72], [176, 122, 161], [255, 157, 167], [156, 117, 95], [186, 176, 172]];
+let selected = 0, hidden = 0;
+// Objects filtered out in the desktop app are drawn and picked as if they were not objects.
+const shown = new Uint8Array(D.objects.reduce((m, o) => Math.max(m, o[0]), 0) + 1).fill(1);
+shown[0] = 0;
+const isShown = j => j > 0 && shown[j] === 1;
+const css = c => `rgb(${c.map(Math.round).join(",")})`;
+function colours() {
+  const mode = $("colour").value, C = new Uint8Array(3 * N), dz = zHi - zLo;
+  for (let i = 0; i < N; i++) {
+    const h = (P[3 * i + 2] - zLo) / dz;
+    let c;
+    if (selected) c = I[i] === selected ? [255, 236, 64] : ramp(TERRAIN, h).map(v => v * 0.45);
+    else if (mode === "height") c = ramp(VIRIDIS, h);
+    else if (mode === "intensity") c = ramp(GREY, V[i] / 255);
+    else if (mode === "objects") c = isShown(I[i]) ? OBJECT[I[i] % OBJECT.length] : ramp(TERRAIN, h);
+    else if (mode === "las") c = LAS_COLOUR[L[i]] || [120, 120, 120];
+    else if (mode === "truth") c = T[i] && (T[i] === 3 || isShown(I[i])) ? TRUTH[T[i]] : ramp(TERRAIN, h).map(v => v * 0.7);
+    else c = K[i] > 0 && (I[i] === 0 || shown[I[i]]) ? CLASS[(K[i] - 1) % CLASS.length] : ramp(TERRAIN, h);
+    C[3 * i] = c[0]; C[3 * i + 1] = c[1]; C[3 * i + 2] = c[2];
+  }
+  gl.bindBuffer(gl.ARRAY_BUFFER, colBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, C, gl.STATIC_DRAW);
+  legend(mode);
+  draw();
+}
+const classCounts = new Array(classNames.length).fill(0);
+for (let i = 0; i < N; i++) classCounts[K[i]]++;
+function legend(mode) {
+  const box = $("legend");
+  if (mode === "las") {
+    const counts = new Map();
+    for (let i = 0; i < N; i++) counts.set(L[i], (counts.get(L[i]) || 0) + 1);
+    box.innerHTML = `<div class="title">Class stored in the input file (LAS code)</div>` + D.las_names.map(([code, name]) =>
+      `<div class="row"><span class="swatch" style="background:${css(LAS_COLOUR[code] || [120, 120, 120])}"></span>${code} ${name}` +
+      `<span class="count">${(counts.get(code) || 0).toLocaleString("en")}</span></div>`).join("");
+    return;
+  }
+  if (mode === "truth") {
+    const counts = [0, 0, 0, 0];
+    for (let i = 0; i < N; i++) counts[T[i]]++;
+    const found = truthObjects.filter(t => t[2] === "detected").length;
+    box.innerHTML = `<div class="title">Compared with known targets · ${found} of ${truthObjects.length} found</div>` +
+      [1, 2, 3].map(k => `<div class="row"><span class="swatch" style="background:${css(TRUTH[k])}"></span>${TRUTH_NAMES[k]} points` +
+        `<span class="count">${counts[k].toLocaleString("en")}</span></div>`).join("");
+    return;
+  }
+  if (mode === "height") {
+    box.innerHTML = `<div class="title">Height (m)</div><div class="ramp" style="background:linear-gradient(90deg,${VIRIDIS.map(css)})"></div>
+      <div class="ramp-labels"><span>${(zLo + originZ).toFixed(1)}</span><span>${(zHi + originZ).toFixed(1)}</span></div>`;
+    return;
+  }
+  if (mode === "intensity") {
+    box.innerHTML = `<div class="title">Intensity</div><div class="ramp" style="background:linear-gradient(90deg,${GREY.map(css)})"></div>
+      <div class="ramp-labels"><span>low</span><span>high</span></div>`;
+    return;
+  }
+  box.innerHTML = `<div class="title">${mode === "objects" ? "Each object its own colour" : "Classes"} · untick to hide</div>` +
+    classNames.map(([, name], k) => {
+      const colour = k === 0 ? `linear-gradient(90deg,${TERRAIN.map(css)})`
+        : mode === "objects" ? `conic-gradient(${OBJECT.slice(0, 5).map(css)})` : css(CLASS[(k - 1) % CLASS.length]);
+      return `<label class="row" title="Untick to hide this class's points."><input type="checkbox" data-k="${k}" ${hidden >> k & 1 ? "" : "checked"}>
+        <span class="swatch" style="background:${colour}"></span>${name}<span class="count">${classCounts[k].toLocaleString("en")}</span></label>`;
+    }).join("");
+  box.querySelectorAll("input").forEach(cb => cb.addEventListener("change", () => {
+    const bit = 1 << Number(cb.dataset.k);
+    hidden = cb.checked ? hidden & ~bit : hidden | bit;
+    draw();
+  }));
+}
+
+// ---- Orbit camera around a target, Z up; perspective with a 45° vertical field of view.
+let target, dist, azim, elev;
+const FOV = Math.PI / 4;
+function view() {
+  const eye = [target[0] + dist * Math.cos(elev) * Math.cos(azim), target[1] + dist * Math.cos(elev) * Math.sin(azim),
+               target[2] + dist * Math.sin(elev)];
+  const z = eye.map((v, k) => v - target[k]), zl = Math.hypot(...z); z.forEach((v, k) => z[k] = v / zl);
+  let x = [-z[1], z[0], 0]; const xl = Math.hypot(...x) || 1; x = x.map(v => v / xl);
+  const y = [z[1] * x[2] - z[2] * x[1], z[2] * x[0] - z[0] * x[2], z[0] * x[1] - z[1] * x[0]];
+  const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+  return { x, y, z, m: [x[0], y[0], z[0], 0, x[1], y[1], z[1], 0, x[2], y[2], z[2], 0, -dot(x, eye), -dot(y, eye), -dot(z, eye), 1] };
+}
+function matrix() {
+  const w = canvas.width || 1, h = canvas.height || 1, f = 1 / Math.tan(FOV / 2);
+  const near = Math.max(dist - radius * 1.5, dist / 1000, 0.01), far = dist + radius * 1.5;
+  const { x, y, m: v } = view();
+  const proj = [f * h / w, 0, 0, 0, 0, f, 0, 0, 0, 0, (far + near) / (near - far), -1, 0, 0, 2 * far * near / (near - far), 0];
+  const m = new Float32Array(16);
+  for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++) { let s = 0; for (let k = 0; k < 4; k++) s += proj[k * 4 + r] * v[c * 4 + k]; m[c * 4 + r] = s; }
+  return { m, x, y, near, far };
+}
+function fit() {  // Distance at which a sample of the points fills about 90% of the view.
+  const corners = [];
+  for (let i = 0; i < N; i += Math.max(1, Math.floor(N / 4000))) corners.push([P[3 * i], P[3 * i + 1], P[3 * i + 2]]);
+  const aspect = (canvas.clientWidth || 1) / (canvas.clientHeight || 1), t = Math.tan(FOV / 2) * 0.9;
+  dist = radius * 3;
+  for (let it = 0; it < 30; it++) {
+    const { x, y, z } = view();
+    let need = 0;
+    for (const p of corners) {
+      const d = p.map((v, k) => v - target[k]), dot = a => d[0] * a[0] + d[1] * a[1] + d[2] * a[2];
+      need = Math.max(need, Math.abs(dot(x)) / (t * aspect) + dot(z), Math.abs(dot(y)) / t + dot(z));
+    }
+    dist = need;
+  }
+}
+function reset(top) {
+  target = centre.slice(); azim = mainAxis - Math.PI / 2; elev = top ? 1.5 : 0.62; fit(); draw();
+}
+let pending = false;
+function draw() {
+  if (pending || !target) return;
+  pending = true;
+  requestAnimationFrame(() => {
+    pending = false;
+    const dpr = window.devicePixelRatio || 1, w = Math.round(canvas.clientWidth * dpr), h = Math.round(canvas.clientHeight * dpr);
+    if (!w || !h) return;
+    if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
+    targets(w, h);
+    const { m, near, far } = matrix();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+    gl.viewport(0, 0, w, h);
+    gl.enable(gl.DEPTH_TEST);
+    gl.clearColor(0.059, 0.09, 0.133, 1);
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    gl.useProgram(lineProg); gl.bindVertexArray(gridVao);
+    gl.uniformMatrix4fv(loc(lineProg, "m"), false, m); gl.uniform4f(loc(lineProg, "col"), 0.17, 0.25, 0.34, 1);
+    gl.drawArrays(gl.LINES, 0, grid.length / 3);
+    gl.useProgram(pointProg); gl.bindVertexArray(vao);
+    gl.uniformMatrix4fv(loc(pointProg, "m"), false, m);
+    gl.uniform1f(loc(pointProg, "s"), $("size").value * dpr);
+    gl.uniform1ui(loc(pointProg, "hidden"), hidden >>> 0);
+    gl.drawArrays(gl.POINTS, 0, N);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, w, h);
+    gl.disable(gl.DEPTH_TEST);
+    gl.useProgram(edlProg);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, colourTex); gl.uniform1i(loc(edlProg, "colour"), 0);
+    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, depthTex); gl.uniform1i(loc(edlProg, "depth"), 1);
+    gl.uniform2f(loc(edlProg, "px"), 1 / w, 1 / h);
+    gl.uniform1f(loc(edlProg, "near"), near); gl.uniform1f(loc(edlProg, "far"), far);
+    gl.uniform1f(loc(edlProg, "strength"), $("edl").checked ? 1.6 : 0);
+    gl.uniform3f(loc(edlProg, "bg"), 0.059, 0.09, 0.133);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+  });
+}
+
+// ---- Mouse: rotate, pan, zoom, click to identify.
+let drag = null;
+canvas.addEventListener("contextmenu", e => e.preventDefault());
+canvas.addEventListener("mousedown", e => { drag = { x: e.clientX, y: e.clientY, pan: e.button === 2 || e.shiftKey, moved: false }; });
+window.addEventListener("mouseup", e => { if (drag && !drag.moved && e.target === canvas) pick(e); drag = null; });
+window.addEventListener("mousemove", e => {
+  if (!drag) return;
+  const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+  if (Math.abs(dx) + Math.abs(dy) > 2) drag.moved = true;
+  drag.x = e.clientX; drag.y = e.clientY;
+  if (drag.pan) {
+    const { x, y } = view(), s = dist * Math.tan(FOV / 2) * 2 / canvas.clientHeight;
+    for (let k = 0; k < 3; k++) target[k] += (-dx * x[k] + dy * y[k]) * s;
+  } else {
+    azim -= dx * 0.008; elev = Math.max(-1.5, Math.min(1.5, elev + dy * 0.008));
+  }
+  draw();
+});
+canvas.addEventListener("wheel", e => { e.preventDefault(); dist *= Math.exp(e.deltaY * 0.0015); draw(); }, { passive: false });
+canvas.addEventListener("dblclick", () => { selected = 0; colours(); reset(false); });
+new ResizeObserver(() => draw()).observe(canvas);
+
+const describe = o => `${o[1]} · ${o[2]} · ${o[3].toLocaleString("en")} points · confidence ${o[4].toFixed(3)}`;
+function pick(e) {
+  const { m } = matrix(), r = canvas.getBoundingClientRect();
+  const mx = (e.clientX - r.left) / r.width * 2 - 1, my = 1 - (e.clientY - r.top) / r.height * 2, tol = 8 / r.height * 2;
+  let best = -1, bestDepth = Infinity;
+  for (let i = 0; i < N; i++) {
+    if (hidden >> K[i] & 1) continue;
+    const px = P[3 * i], py = P[3 * i + 1], pz = P[3 * i + 2];
+    const w = m[3] * px + m[7] * py + m[11] * pz + m[15];
+    if (w <= 0) continue;
+    const sx = (m[0] * px + m[4] * py + m[8] * pz + m[12]) / w, sy = (m[1] * px + m[5] * py + m[9] * pz + m[13]) / w;
+    if (Math.abs(sx - mx) > tol || Math.abs(sy - my) > tol) continue;
+    const depth = (m[2] * px + m[6] * py + m[10] * pz + m[14]) / w;  // Nearest to the camera wins.
+    if (depth < bestDepth) { bestDepth = depth; best = i; }
+  }
+  if (best < 0) { $("pick").textContent = "No point here."; selected = 0; colours(); console.log("PICK "); return; }
+  const o = isShown(I[best]) ? objects.get(I[best]) : undefined, z = (P[3 * best + 2] + originZ).toFixed(2);
+  const las = L ? ` · LAS class ${L[best]}` : "", truth = T && T[best] ? ` · ${TRUTH_NAMES[T[best]]}` : "";
+  $("pick").textContent = (o ? `${describe(o)} · Z ${z} m` : `${classNames[K[best]][1]} point · Z ${z} m`) + las + truth;
+  selected = o ? o[0] : 0;
+  colours();
+  console.log("PICK " + (o ? o[1] : ""));  // Read by the desktop app to select the object in its table.
+}
+// Also called by the desktop app when an object is chosen in its table.
+function focusObject(id) {
+  const q = String(id).trim().toUpperCase();
+  const o = q && D.objects.find(o => o[1].toUpperCase() === q || o[1].toUpperCase().endsWith("_" + q));
+  const t = !o && q && truthObjects.find(t => t[0].toUpperCase() === q);
+  if (t) {  // A known target: fly to it, whether or not it was detected.
+    $("pick").textContent = `Known target ${t[0]} · ${t[1]} · ${t[2]}`;
+    target = [t[3], t[4], t[5]]; dist = Math.min(dist, Math.max(15, radius / 12));
+    selected = 0;
+    if (T) $("colour").value = "truth";
+    colours();
+    return true;
+  }
+  if (!o) { $("pick").textContent = "Object not found."; return false; }
+  $("pick").textContent = describe(o);
+  $("find").value = o[1];
+  target = [o[5], o[6], o[7]]; dist = Math.min(dist, Math.max(15, radius / 12));
+  selected = o[0];
+  colours();
+  return true;
+}
+window.focusObject = focusObject;
+// Called by the desktop app: show only these object IDs, or every object when ids is null.
+function setVisibleObjects(ids) {
+  const keep = ids && new Set(ids);
+  for (const o of D.objects) shown[o[0]] = !keep || keep.has(o[1]) ? 1 : 0;
+  const count = keep ? D.objects.filter(o => keep.has(o[1])).length : D.objects.length;
+  $("summary").textContent = `${N.toLocaleString("en")} of ${D.total.toLocaleString("en")} points · ` +
+    (keep ? `${count.toLocaleString("en")} of ` : "") + `${D.objects.length.toLocaleString("en")} objects`;
+  if (selected && !shown[selected]) selected = 0;
+  colours();
+}
+window.setVisibleObjects = setVisibleObjects;
+$("find").addEventListener("keydown", e => { if (e.key === "Enter") focusObject($("find").value); });
+$("reset").addEventListener("click", () => { selected = 0; colours(); reset(false); });
+$("top").addEventListener("click", () => reset(true));
+$("colour").addEventListener("change", () => { selected = 0; colours(); });
+$("size").addEventListener("input", draw);
+$("edl").addEventListener("change", draw);
+reset(false);
+colours();
+</script>
+</body>
+</html>

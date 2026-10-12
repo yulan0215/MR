@@ -7,7 +7,7 @@ import laspy
 import numpy as np
 from pyproj import CRS
 
-from core import Settings, process_batch, train_model
+from core import Settings, process_batch, train_model, write_label_source
 
 
 def create_demo(destination):
@@ -24,7 +24,7 @@ def create_demo(destination):
         two = rng.uniform([-0.35, -0.3, -0.1], [0.35, 0.3, 0.1], size=(140, 3)) + [6, 5, -2]
         xyz = np.vstack((background, one, two))
         xyz += [500000 + seed * 100, 6000000, 0]
-        labels = np.r_[np.zeros(len(background), dtype=int), np.ones(len(one) + len(two), dtype=int)]
+        labels = np.r_[np.zeros(len(background), dtype=int), np.full(len(one) + len(two), 64)]
         header = laspy.LasHeader(point_format=3, version="1.2")
         header.scales = [0.001, 0.001, 0.001]
         header.offsets = [500000, 6000000, 0]
@@ -44,10 +44,11 @@ def create_demo(destination):
             writer = csv.writer(stream)
             writer.writerow(["point_index", "class_id"])
             writer.writerows(enumerate(labels))
+        write_label_source(label_path, filename, len(labels))
         records.append({"path": filename.name, "labels": label_path.name,
                         "split": split, "scene_id": f"SYNTHETIC_scene_{seed}"})
     (destination / "manifest.json").write_text(json.dumps(
-        {"classes": {"0": "background", "1": "synthetic_object"}, "datasets": records}, indent=2), encoding="utf-8")
+        {"classes": {"64": "synthetic_object"}, "datasets": records}, indent=2), encoding="utf-8")
     (destination / "SYNTHETIC_ONLY.txt").write_text(
         "Synthetic geometry and intensity for software workflow checks only. Not real Ratman project data.\n"
         "A model trained on these data has no demonstrated real-world underwater detection performance.\n", encoding="utf-8")

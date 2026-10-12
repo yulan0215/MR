@@ -11,3 +11,5 @@ data/
 *.pem
 *.key
 *.log
+.DS_Store
+metal_demo/

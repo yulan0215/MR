@@ -18,10 +18,19 @@ Ten synthetic LAZ workflow tests passed:
   metric-unit checks, point limits and no model overwrite
 
 GUI smoke validation:
-  English interface creation, saved-result loading, View,
-  Show objects toggling, object ID selection and figure rendering.
+  English interface creation, saved-result loading, object table,
+  embedded Qt WebEngine 3D view, table-to-3D focus and 3D-click-to-table selection.
 
 These are software functionality checks. No real-world object-detection AP,
 instance IoU, acceptance threshold or trained underwater production model is claimed.
 
-Object Detection UI verified with 1,000 / 5,000 / 10,000 / 30,000 point budgets. New saved caches are sampled before writing; source-point mapping and full-resolution exports remain intact.
+3D view verified on Devil's Bridge (7.3 M points): 3,000,000 points shown, 3.4 ms per frame in Qt WebEngine; full-resolution exports remain intact.
+
+Tiled processing (12 October 2026, 10-core 64 GB Mac):
+  features computed tile by tile (tiles of 300,000 points) are bit-identical to whole-file features on
+  the three metal_demo scenes and Barseback (LAS 1.2); full runs give identical predictions, objects,
+  reports, object CSVs, evaluations, 3D pages and byte-identical classified.laz (also LAS 1.2 -> 1.4)
+  Saint-Bauzille 14.7 M points: 27 s, peak 2.0 GB (whole-file 27 s, 6.5 GB)
+  4 x Saint-Bauzille, 58.9 M points: 113 s, peak 3.1 GB (whole-file 107 s, 19.2 GB)
+  versus the previous version, only equally near neighbours and near-equal forest votes now resolve
+  deterministically: no class changed on metal_demo or Saint-Bauzille, 58 of 7.5 M points on Barseback

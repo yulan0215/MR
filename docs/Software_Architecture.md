@@ -6,18 +6,18 @@ The prototype runs as one local Python desktop process. A GUI thread handles int
 
 | Component | Responsibility | Implementation |
 |---|---|---|
-| Desktop interface and queue | Training, model selection, single/batch jobs, saved-result viewing, settings and error log | Tkinter, worker thread and event queue in `app.py` |
+| Desktop interface and queue | Training, model selection, single/batch jobs, saved-result viewing, settings and error log | PySide6 (Qt), worker thread and queued Qt signal in `app.py` |
 | Import and validation | Read LAS/LAZ, check attributes, CRS, metric units, point limits and waveform indicators | laspy, lazrs and pyproj in `core.py` |
 | Feature preparation | Preserve original point mapping; calculate local geometry, intensity, return and scan-angle features | NumPy, SciPy and cKDTree |
 | Model management | Train RF or MLP, validate, save/reload schema and settings, predict point classes and scores | scikit-learn and joblib |
 | Instance grouping and properties | Per-class global clustering, batch-unique IDs, centroids, counts, intensity, agreed area and confidence | DBSCAN, NumPy and SciPy |
-| Export and visualisation | Per-object XYZ CSV, per-dataset reports, run metadata and reopenable 3D cache | CSV, JSON, NPZ and Matplotlib |
+| Export and visualisation | Per-object XYZ CSV, per-dataset reports, run metadata and reopenable 3D view | CSV, JSON and offline WebGL HTML |
 
 ## Data flow
 
 LAS/LAZ import produces original double-precision coordinates and attributes. Feature calculations use translated local coordinates to avoid unnecessary sensitivity to large map offsets. Predictions retain the original record order. Per-class clustering produces final instance membership; all exported object properties are calculated from the original assigned coordinates.
 
-The viewer subtracts the scene centre and samples points for display. It reads the saved NPZ and object metadata. The display transformation and sampling do not change reports or CSV exports.
+The 3D view (`view3d.html`) subtracts the scene centre and samples up to 3,000,000 points, object points first, and is drawn by the GPU in an embedded Qt WebEngine view (or any browser). The display transformation and sampling do not change reports or CSV exports.
 
 Training consumes labelled independent scenes. The manifest explicitly separates train, validation and test datasets. A model stores its class definitions, feature schema, neighbour count, preprocessing settings, provenance and validation results. Independent test evaluation is a separate user action.
 
@@ -31,8 +31,8 @@ Voxelisation must retain an explicit mapping back to original points. Tiled proc
 
 Target classes, annotation effort, final train/validation/test scenes, area definition, intensity and confidence treatment, output precision, supported platform versions, hardware, object-level quality metrics and acceptance thresholds remain project decisions. See the original v0.2 requirements.
 
-The current processing strategy is full-file CPU execution, with explicit size limits. It does not provide learning-based instance separation, full-waveform integration, large-cloud tiling or cross-file duplicate merging.
+Processing is CPU execution over spatial tiles streamed from each file, with results identical to whole-file processing. It does not provide learning-based instance separation, full-waveform integration, level-of-detail display of a whole survey or cross-file duplicate merging.
 
 ## Display memory update
 
-The application is titled Object Detection. Processing creates a separate display cache with at most 30,000 original points, deterministic instance representatives and original point indices. The UI can reduce this to 1,000, 5,000 or 10,000 points. Reports and exports retain full-resolution detected points. Legacy NPZ caches above 32 MiB uncompressed are rejected before decompression. The default 500,000-point processing limit remains; this update does not implement large-cloud tiled inference.
+The application is titled Object Detection. The desktop window shows a sortable object table beside the embedded 3D view; selecting in either one selects in the other. Reports and exports retain full-resolution detected points. Processing has no default point limit; files are streamed and processed in spatial tiles (memory about 40 bytes per point plus one tile), with a RAM and disk estimate checked before decoding and multi-core feature extraction, classification and clustering.
